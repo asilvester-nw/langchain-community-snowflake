@@ -92,14 +92,22 @@ class ChatSnowflakeCortex(BaseChatModel):
     To use the chat model, you must have the ``snowflake-snowpark-python`` Python
     package installed and either:
 
-        1. environment variables set with your snowflake credentials or
-        2. directly passed in as kwargs to the ChatSnowflakeCortex constructor.
+        1. environment variables set with your snowflake credentials,
+        2. directly passed in as kwargs to the ChatSnowflakeCortex constructor, or
+        3. provide an existing Snowpark session object.
 
     Example:
         .. code-block:: python
 
             from langchain_community.chat_models import ChatSnowflakeCortex
+            
+            # Using environment variables
             chat = ChatSnowflakeCortex()
+            
+            # Using an existing session
+            from snowflake.snowpark import Session
+            session = Session.builder.configs(your_connection_params).create()
+            chat = ChatSnowflakeCortex(session=session)
     """
 
     # test_tools: Dict[str, Any] = Field(default_factory=dict)
@@ -108,7 +116,11 @@ class ChatSnowflakeCortex(BaseChatModel):
     )
 
     session: Any = None
-    """Snowpark session object."""
+    """Snowpark session object. If provided, it will be used instead of creating 
+    a new session from environment variables."""
+
+    _session_created_internally: bool = Field(default=False, exclude=True)
+    """Private field to track if session was created internally."""
 
     model: str = "mistral-large"
     """Snowflake cortex hosted LLM model name, defaulted to `mistral-large`.
@@ -185,6 +197,29 @@ class ChatSnowflakeCortex(BaseChatModel):
                 """
             )
 
+        # If a session object is already provided, validate it and use it
+        if values.get("session") is not None:
+            session = values["session"]
+            # Validate that it's a Snowpark Session object
+            if not isinstance(session, Session):
+                raise ChatSnowflakeCortexError(
+                    "Provided session must be a valid snowflake.snowpark.Session object"
+                )
+            
+            # Check if the session is active/valid
+            try:
+                # Test the session by running a simple query
+                session.sql("SELECT 1").collect()
+            except Exception as e:
+                raise ChatSnowflakeCortexError(
+                    f"Provided session is not valid or active: {e}"
+                )
+            
+            # Session is valid, mark it as externally provided
+            values["_session_created_internally"] = False
+            return values
+
+        # No session provided, create one using environment variables
         values["snowflake_username"] = get_from_dict_or_env(
             values, "snowflake_username", "SNOWFLAKE_USERNAME"
         )
@@ -220,13 +255,14 @@ class ChatSnowflakeCortex(BaseChatModel):
 
         try:
             values["session"] = Session.builder.configs(connection_params).create()
+            values["_session_created_internally"] = True
         except Exception as e:
             raise ChatSnowflakeCortexError(f"Failed to create session: {e}")
 
         return values
 
     def __del__(self) -> None:
-        if getattr(self, "session", None) is not None:
+        if getattr(self, "session", None) is not None and self._session_created_internally:
             self.session.close()
 
     @property
